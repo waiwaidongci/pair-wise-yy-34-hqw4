@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from .accident_http import AccidentRouter, error_response as accident_error
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
                      ValidationError)
 from .service import Service
 
 
-def make_handler(service: Service, static_dir: str):
+def make_handler(service: Service, static_dir: str, accident_router=None):
     root = Path(static_dir)
 
     class Handler(BaseHTTPRequestHandler):
@@ -75,7 +76,17 @@ def make_handler(service: Service, static_dir: str):
 
         def do_GET(self) -> None:
             try:
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
+                if accident_router is not None and (
+                        path.startswith("/api/accidents")
+                        or path.startswith("/api/merge-groups")):
+                    actor, role = self._identity()
+                    result = accident_router.handle_get(
+                        path, parse_qs(parsed.query), actor, role)
+                    if result is not None:
+                        self._json(result[0], result[1])
+                        return
                 if path == "/health":
                     self._json(200, {"status": "ok"})
                 elif path == "/":
@@ -101,13 +112,28 @@ def make_handler(service: Service, static_dir: str):
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
-                self._send_error(exc)
+                if accident_router is not None and (
+                        urlparse(self.path).path.startswith("/api/accidents")
+                        or urlparse(self.path).path.startswith("/api/merge-groups")):
+                    status, payload = accident_error(exc)
+                    self._json(status, payload)
+                else:
+                    self._send_error(exc)
 
         def do_POST(self) -> None:
             try:
                 path = urlparse(self.path).path
                 actor, role = self._identity()
                 body = self._body()
+                if accident_router is not None and (
+                        path.startswith("/api/accidents")
+                        or path.startswith("/api/merge-groups")):
+                    result = accident_router.handle_post(path, body, actor, role)
+                    if result is not None:
+                        self._json(result[0], result[1])
+                        return
+                    self._json(404, {"error": "not_found"})
+                    return
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
@@ -122,6 +148,12 @@ def make_handler(service: Service, static_dir: str):
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
-                self._send_error(exc)
+                if accident_router is not None and (
+                        urlparse(self.path).path.startswith("/api/accidents")
+                        or urlparse(self.path).path.startswith("/api/merge-groups")):
+                    status, payload = accident_error(exc)
+                    self._json(status, payload)
+                else:
+                    self._send_error(exc)
 
     return Handler
