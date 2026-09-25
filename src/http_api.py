@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
@@ -73,9 +73,15 @@ def make_handler(service: Service, static_dir: str):
                 status = 500
             self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
 
+        @staticmethod
+        def _merge_request_id(path: str) -> int:
+            return int(path.split("/")[3])
+
         def do_GET(self) -> None:
             try:
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
+                query = parse_qs(parsed.query)
                 if path == "/health":
                     self._json(200, {"status": "ok"})
                 elif path == "/":
@@ -83,7 +89,8 @@ def make_handler(service: Service, static_dir: str):
                 elif path == "/api/items":
                     actor, role = self._identity()
                     del actor
-                    self._json(200, {"items": service.list_items(role)})
+                    status = query.get("status", [None])[0]
+                    self._json(200, {"items": service.list_items(role, status)})
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     actor, role = self._identity()
@@ -94,10 +101,23 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, service.get_item(item_id, role))
+                elif path == "/api/merge-requests":
+                    actor, role = self._identity()
+                    del actor
+                    status = query.get("status", [None])[0]
+                    self._json(200, {"merge_requests": service.list_merge_requests(role, status)})
+                elif path.startswith("/api/merge-requests/"):
+                    request_id = self._merge_request_id(path)
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_merge_request(request_id, role))
                 elif path == "/api/audit":
                     actor, role = self._identity()
                     del actor
-                    self._json(200, {"events": service.audit(role)})
+                    item_value = query.get("entity_id", [None])[0]
+                    item_id = int(item_value) if item_value is not None else None
+                    entity_type = query.get("entity_type", [None])[0]
+                    self._json(200, {"events": service.audit(role, item_id, entity_type)})
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -119,6 +139,14 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif (path.startswith("/api/merge-requests/")
+                      and path.endswith("/merge")):
+                    request_id = self._merge_request_id(path)
+                    self._json(200, service.merge_request(request_id, body, actor, role))
+                elif (path.startswith("/api/merge-requests/")
+                      and path.endswith("/undo")):
+                    request_id = self._merge_request_id(path)
+                    self._json(200, service.undo_merge(request_id, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
